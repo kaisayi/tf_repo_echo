@@ -126,6 +126,13 @@ def cnn_model_fn(features, labels, mode):
     return tf.estimator.EstimatorSpec(
         mode=mode, loss=loss, eval_metric_ops=eval_metric_ops)
 
+def serving_input_receiver_fn():
+    features = {
+        "x": tf.placeholder(tf.float32, [None, 28, 28], name="x"),
+    }
+    return tf.estimator.export.build_raw_serving_input_receiver_fn(features)
+
+
 
 def main(_):
     # Horovod: initialize Horovod.
@@ -192,11 +199,11 @@ def main(_):
         shuffle=True)
 
     # Horovod: adjust number of steps based on number of GPUs.
-    mnist_classifier.train(
-        input_fn=train_input_fn,
-        # steps=20000 // hvd.size(),
-        steps=20000,
-        hooks=[logging_hook])
+    # mnist_classifier.train(
+    #     input_fn=train_input_fn,
+    #     # steps=20000 // hvd.size(),
+    #     steps=20000,
+    #     hooks=[logging_hook])
 
     # Evaluate the model and print results
     eval_input_fn = tf.estimator.inputs.numpy_input_fn(
@@ -204,8 +211,23 @@ def main(_):
         y=eval_labels,
         num_epochs=1,
         shuffle=False)
-    eval_results = mnist_classifier.evaluate(input_fn=eval_input_fn)
-    print(eval_results)
+    # eval_results = mnist_classifier.evaluate(input_fn=eval_input_fn)
+    # print(eval_results)
+    train_spec = tf.estimator.TrainSpec(
+        input_fn=train_input_fn,
+        max_steps=10000,
+        hooks=[logging_hook]
+    )
+    exporter = tf.estimator.LatestExporter(
+        'saved_model',
+        serving_input_receiver_fn=serving_input_receiver_fn
+    )
+    eval_spec = tf.estimator.EvalSpec(
+        input_fn=eval_input_fn,
+        steps=None,
+        exporters=[exporter]
+    )
+    tf.estimator.train_and_evaluate(mnist_classifier, train_spec, eval_spec)
 
 
 if __name__ == "__main__":
