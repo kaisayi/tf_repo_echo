@@ -1,90 +1,133 @@
-# Copyright 2019 Uber Technologies, Inc. All Rights Reserved.
+#  Copyright 2018 Uber Technologies, Inc. All Rights Reserved.
+#  Copyright 2016 The TensorFlow Authors. All Rights Reserved.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#   http://www.apache.org/licenses/LICENSE-2.0
 #
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# ==============================================================================
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+"""Convolutional Neural Network Estimator for MNIST, built with tf.layers."""
 
 import os
 import errno
+import numpy as np
 import tensorflow as tf
 import horovod.tensorflow as hvd
-import numpy as np
-import argparse
 
 from tensorflow import keras
 
-layers = tf.layers
-
 tf.logging.set_verbosity(tf.logging.INFO)
 
-# Training settings
-parser = argparse.ArgumentParser(description='Tensorflow MNIST Example')
-parser.add_argument('--use-adasum', action='store_true', default=False,
-                    help='use adasum algorithm to do reduction')
-parser.add_argument('--gradient-predivide-factor', type=float, default=1.0,
-                    help='apply gradient predivide factor in optimizer (default: 1.0)')
-args = parser.parse_args()
 
-def conv_model(feature, target, mode):
-    """2-layer convolution model."""
-    # Convert the target to a one-hot tensor of shape (batch_size, 10) and
-    # with a on-value of 1 for each one-hot vector of length 10.
-    target = tf.one_hot(tf.cast(target, tf.int32), 10, 1, 0)
+def cnn_model_fn(features, labels, mode):
+    """Model function for CNN."""
+    # Input Layer
+    # Reshape X to 4-D tensor: [batch_size, width, height, channels]
+    # MNIST images are 28x28 pixels, and have one color channel
+    input_layer = tf.reshape(features["x"], [-1, 28, 28, 1])
 
-    # Reshape feature to 4d tensor with 2nd and 3rd dimensions being
-    # image width and height final dimension being the number of color channels.
-    feature = tf.reshape(feature, [-1, 28, 28, 1])
+    # Convolutional Layer #1
+    # Computes 32 features using a 5x5 filter with ReLU activation.
+    # Padding is added to preserve width and height.
+    # Input Tensor Shape: [batch_size, 28, 28, 1]
+    # Output Tensor Shape: [batch_size, 28, 28, 32]
+    conv1 = tf.layers.conv2d(
+        inputs=input_layer,
+        filters=32,
+        kernel_size=[5, 5],
+        padding="same",
+        activation=tf.nn.relu)
 
-    # First conv layer will compute 32 features for each 5x5 patch
-    with tf.variable_scope('conv_layer1'):
-        h_conv1 = layers.conv2d(feature, 32, kernel_size=[5, 5],
-                                activation=tf.nn.relu, padding="SAME")
-        h_pool1 = tf.nn.max_pool(
-            h_conv1, ksize=[1, 2, 2, 1], strides=[1, 2, 2, 1], padding='SAME')
+    # Pooling Layer #1
+    # First max pooling layer with a 2x2 filter and stride of 2
+    # Input Tensor Shape: [batch_size, 28, 28, 32]
+    # Output Tensor Shape: [batch_size, 14, 14, 32]
+    pool1 = tf.layers.max_pooling2d(inputs=conv1, pool_size=[2, 2], strides=2)
 
-    # Second conv layer will compute 64 features for each 5x5 patch.
-    with tf.variable_scope('conv_layer2'):
-        h_conv2 = layers.conv2d(h_pool1, 64, kernel_size=[5, 5],
-                                activation=tf.nn.relu, padding="SAME")
-        h_pool2 = tf.nn.max_pool(
-            h_conv2, ksize=[1, 2, 2, 1], strides=[1, 2, 2, 1], padding='SAME')
-        # reshape tensor into a batch of vectors
-        h_pool2_flat = tf.reshape(h_pool2, [-1, 7 * 7 * 64])
+    # Convolutional Layer #2
+    # Computes 64 features using a 5x5 filter.
+    # Padding is added to preserve width and height.
+    # Input Tensor Shape: [batch_size, 14, 14, 32]
+    # Output Tensor Shape: [batch_size, 14, 14, 64]
+    conv2 = tf.layers.conv2d(
+        inputs=pool1,
+        filters=64,
+        kernel_size=[5, 5],
+        padding="same",
+        activation=tf.nn.relu)
 
-    # Densely connected layer with 1024 neurons.
-    h_fc1 = layers.dropout(
-        layers.dense(h_pool2_flat, 1024, activation=tf.nn.relu),
-        rate=0.5, training=mode == tf.estimator.ModeKeys.TRAIN)
+    # Pooling Layer #2
+    # Second max pooling layer with a 2x2 filter and stride of 2
+    # Input Tensor Shape: [batch_size, 14, 14, 64]
+    # Output Tensor Shape: [batch_size, 7, 7, 64]
+    pool2 = tf.layers.max_pooling2d(inputs=conv2, pool_size=[2, 2], strides=2)
 
-    # Compute logits (1 per class) and compute loss.
-    logits = layers.dense(h_fc1, 10, activation=None)
-    loss = tf.losses.softmax_cross_entropy(target, logits)
+    # Flatten tensor into a batch of vectors
+    # Input Tensor Shape: [batch_size, 7, 7, 64]
+    # Output Tensor Shape: [batch_size, 7 * 7 * 64]
+    pool2_flat = tf.reshape(pool2, [-1, 7 * 7 * 64])
 
-    return tf.argmax(logits, 1), loss
+    # Dense Layer
+    # Densely connected layer with 1024 neurons
+    # Input Tensor Shape: [batch_size, 7 * 7 * 64]
+    # Output Tensor Shape: [batch_size, 1024]
+    dense = tf.layers.dense(inputs=pool2_flat, units=1024,
+                            activation=tf.nn.relu)
+
+    # Add dropout operation; 0.6 probability that element will be kept
+    dropout = tf.layers.dropout(
+        inputs=dense, rate=0.4, training=mode == tf.estimator.ModeKeys.TRAIN)
+
+    # Logits layer
+    # Input Tensor Shape: [batch_size, 1024]
+    # Output Tensor Shape: [batch_size, 10]
+    logits = tf.layers.dense(inputs=dropout, units=10)
+
+    predictions = {
+        # Generate predictions (for PREDICT and EVAL mode)
+        "classes": tf.argmax(input=logits, axis=1),
+        # Add `softmax_tensor` to the graph. It is used for PREDICT and by the
+        # `logging_hook`.
+        "probabilities": tf.nn.softmax(logits, name="softmax_tensor")
+    }
+    if mode == tf.estimator.ModeKeys.PREDICT:
+        return tf.estimator.EstimatorSpec(mode=mode, predictions=predictions)
+
+    # Calculate Loss (for both TRAIN and EVAL modes)
+    onehot_labels = tf.one_hot(indices=tf.cast(labels, tf.int32), depth=10)
+    loss = tf.losses.softmax_cross_entropy(
+        onehot_labels=onehot_labels, logits=logits)
+
+    # Configure the Training Op (for TRAIN mode)
+    if mode == tf.estimator.ModeKeys.TRAIN:
+        # Horovod: scale learning rate by the number of workers.
+        optimizer = tf.train.MomentumOptimizer(
+            learning_rate=0.001 * hvd.size(), momentum=0.9)
+
+        # Horovod: add Horovod Distributed Optimizer.
+        optimizer = hvd.DistributedOptimizer(optimizer, backward_passes_per_step=1)
+
+        train_op = optimizer.minimize(
+            loss=loss,
+            global_step=tf.train.get_global_step())
+        return tf.estimator.EstimatorSpec(mode=mode, loss=loss,
+                                          train_op=train_op)
+
+    # Add evaluation metrics (for EVAL mode)
+    eval_metric_ops = {
+        "accuracy": tf.metrics.accuracy(
+            labels=labels, predictions=predictions["classes"])}
+    return tf.estimator.EstimatorSpec(
+        mode=mode, loss=loss, eval_metric_ops=eval_metric_ops)
 
 
-def train_input_generator(x_train, y_train, batch_size=64):
-    assert len(x_train) == len(y_train)
-    while True:
-        p = np.random.permutation(len(x_train))
-        x_train, y_train = x_train[p], y_train[p]
-        index = 0
-        while index <= len(x_train) - batch_size:
-            yield x_train[index:index + batch_size], \
-                  y_train[index:index + batch_size],
-            index += batch_size
-
-
-def main(_):
+def main(unused_argv):
     # Horovod: initialize Horovod.
     hvd.init()
 
@@ -104,72 +147,63 @@ def main(_):
                 raise
 
     # Download and load MNIST dataset.
-    (x_train, y_train), (x_test, y_test) = \
+    (train_data, train_labels), (eval_data, eval_labels) = \
         keras.datasets.mnist.load_data('MNIST-data-%d' % hvd.rank())
 
     # The shape of downloaded data is (-1, 28, 28), hence we need to reshape it
     # into (-1, 784) to feed into our network. Also, need to normalize the
     # features between 0 and 1.
-    x_train = np.reshape(x_train, (-1, 784)) / 255.0
-    x_test = np.reshape(x_test, (-1, 784)) / 255.0
-
-    # Build model...
-    with tf.name_scope('input'):
-        image = tf.placeholder(tf.float32, [None, 784], name='image')
-        label = tf.placeholder(tf.float32, [None], name='label')
-    predict, loss = conv_model(image, label, tf.estimator.ModeKeys.TRAIN)
-
-    lr_scaler = hvd.size()
-    # By default, Adasum doesn't need scaling when increasing batch size. If used with NCCL,
-    # scale lr by local_size
-    if args.use_adasum:
-        lr_scaler = hvd.local_size() if hvd.nccl_built() else 1
-
-    # Horovod: adjust learning rate based on lr_scaler.
-    opt = tf.train.AdamOptimizer(0.001 * lr_scaler)
-
-    # Horovod: add Horovod Distributed Optimizer.
-    opt = hvd.DistributedOptimizer(opt, op=hvd.Adasum if args.use_adasum else hvd.Average,
-                                   gradient_predivide_factor=args.gradient_predivide_factor)
-
-    global_step = tf.train.get_or_create_global_step()
-    train_op = opt.minimize(loss, global_step=global_step)
-
-    hooks = [
-        # Horovod: BroadcastGlobalVariablesHook broadcasts initial variable states
-        # from rank 0 to all other processes. This is necessary to ensure consistent
-        # initialization of all workers when training is started with random weights
-        # or restored from a checkpoint.
-        hvd.BroadcastGlobalVariablesHook(0),
-
-        # Horovod: adjust number of steps based on number of GPUs.
-        tf.train.StopAtStepHook(last_step=20000 // hvd.size()),
-
-        tf.train.LoggingTensorHook(tensors={'step': global_step, 'loss': loss},
-                                   every_n_iter=10),
-    ]
+    train_data = np.reshape(train_data, (-1, 784)) / 255.0
+    eval_data = np.reshape(eval_data, (-1, 784)) / 255.0
 
     # Horovod: pin GPU to be used to process local rank (one GPU per process)
     config = tf.ConfigProto()
-    config.gpu_options.per_process_gpu_memory_fraction = 0.95
-    # config.gpu_options.allow_growth = True # 不全部占满显存, 按需分配
+    config.gpu_options.allow_growth = True
     config.gpu_options.visible_device_list = str(hvd.local_rank())
 
     # Horovod: save checkpoints only on worker 0 to prevent other workers from
     # corrupting them.
-    checkpoint_dir = './checkpoints' if hvd.rank() == 0 else None
-    training_batch_generator = train_input_generator(x_train,
-                                                     y_train, batch_size=100)
-    # The MonitoredTrainingSession takes care of session initialization,
-    # restoring from a checkpoint, saving to a checkpoint, and closing when done
-    # or an error occurs.
-    with tf.train.MonitoredTrainingSession(checkpoint_dir=checkpoint_dir,
-                                           hooks=hooks,
-                                           config=config) as mon_sess:
-        while not mon_sess.should_stop():
-            # Run a training step synchronously.
-            image_, label_ = next(training_batch_generator)
-            mon_sess.run(train_op, feed_dict={image: image_, label: label_})
+    model_dir = './mnist_convnet_model' if hvd.rank() == 0 else None
+
+    # Create the Estimator
+    mnist_classifier = tf.estimator.Estimator(
+        model_fn=cnn_model_fn, model_dir=model_dir,
+        config=tf.estimator.RunConfig(session_config=config))
+
+    # Set up logging for predictions
+    # Log the values in the "Softmax" tensor with label "probabilities"
+    tensors_to_log = {"probabilities": "softmax_tensor"}
+    logging_hook = tf.train.LoggingTensorHook(
+        tensors=tensors_to_log, every_n_iter=500)
+
+    # Horovod: BroadcastGlobalVariablesHook broadcasts initial variable states from
+    # rank 0 to all other processes. This is necessary to ensure consistent
+    # initialization of all workers when training is started with random weights or
+    # restored from a checkpoint.
+    bcast_hook = hvd.BroadcastGlobalVariablesHook(0)
+
+    # Train the model
+    train_input_fn = tf.estimator.inputs.numpy_input_fn(
+        x={"x": train_data},
+        y=train_labels,
+        batch_size=100,
+        num_epochs=None,
+        shuffle=True)
+
+    # Horovod: adjust number of steps based on number of GPUs.
+    mnist_classifier.train(
+        input_fn=train_input_fn,
+        steps=20000 // hvd.size(),
+        hooks=[logging_hook, bcast_hook])
+
+    # Evaluate the model and print results
+    eval_input_fn = tf.estimator.inputs.numpy_input_fn(
+        x={"x": eval_data},
+        y=eval_labels,
+        num_epochs=1,
+        shuffle=False)
+    eval_results = mnist_classifier.evaluate(input_fn=eval_input_fn)
+    print(eval_results)
 
 
 if __name__ == "__main__":
